@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Finish The Word</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <div id="toast" hidden></div>
+    <div class="confetti" id="confetti"></div>
+
+    <div class="scene">
+      <div class="fit" id="fit">
+      <div class="float">
+        <div class="rectangle" id="card">
+
+          <!-- HOME -->
+          <div class="screen show" id="home">
+            <h1 class="title">Finish The Word</h1>
+            <div class="field">
+              <input type="text" id="name" placeholder=" " maxlength="16" autocomplete="off">
+              <label for="name">Enter your name</label>
+            </div>
+            <div class="buttons">
+              <button class="primary" id="createBtn">Create Room</button>
+              <button class="secondary" id="toJoinBtn">Join Room</button>
+            </div>
+            <p class="err" id="homeErr"></p>
+          </div>
+
+          <!-- JOIN -->
+          <div class="screen" id="join">
+            <h1 class="title">Join a Room</h1>
+            <div class="field">
+              <input type="text" id="codeInput" placeholder=" " maxlength="4" autocomplete="off" style="text-transform:uppercase">
+              <label for="codeInput">Room code</label>
+            </div>
+            <div class="buttons">
+              <button class="secondary" id="backBtn">Back</button>
+              <button class="primary" id="joinBtn">Join</button>
+            </div>
+            <p class="err" id="joinErr"></p>
+          </div>
+
+          <!-- LOBBY / WAITING ROOM -->
+          <div class="screen" id="lobby">
+            <p class="small">Room code</p>
+            <div class="code" id="lobbyCode"></div>
+            <ul class="players" id="lobbyPlayers"></ul>
+            <p class="small" id="lobbyHint"></p>
+            <div class="buttons">
+              <button class="secondary" id="leaveBtn">Leave</button>
+              <button class="primary" id="startBtn">Start</button>
+            </div>
+          </div>
+
+          <!-- GAME -->
+          <div class="screen" id="game">
+
+            <div id="playArea" class="screen show" style="animation:none;gap:20px">
+              <div class="ring" id="ring">
+                <svg viewBox="0 0 80 80"><circle class="bg" cx="40" cy="40" r="34"/><circle class="arc" id="arc" cx="40" cy="40" r="34"/></svg>
+                <span id="ringNum">14</span>
+              </div>
+              <div class="turn-info" id="turnInfo"></div>
+              <div class="letter-big" id="required"></div>
+              <div class="letters" id="letters"></div>
+
+              <div class="typearea" id="typeArea" hidden>
+                <div class="field">
+                  <input type="text" id="wordInput" placeholder=" " maxlength="30" autocomplete="off" autocapitalize="off" spellcheck="false">
+                  <label for="wordInput">Type your word</label>
+                  <div class="mirror" id="wordMirror" aria-hidden="true"></div>
+                </div>
+                <div class="buttons"><button class="primary" id="sendBtn">Send</button></div>
+              </div>
+
+              <div class="live" id="liveTyping"></div>
+              <p class="err" id="gameErr"></p>
+            </div>
+
+            <ul class="players" id="gamePlayers"></ul>
+            <p class="small" id="specInfo"></p>
+
+            <div class="winbox" id="winBox" hidden>
+              <h2 class="title" id="winText"></h2>
+              <div class="buttons">
+                <button class="secondary" id="leave2Btn">Leave</button>
+                <button class="primary" id="restartBtn">Restart match</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+      </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      /* ================= 3D CARD (tilt + press) ================= */
+      const scene = document.querySelector('.scene');
+      const card = document.getElementById('card');
+
+      function tilt(e) {
+        const r = card.getBoundingClientRect();
+        const x = (e.clientX - (r.left + r.width / 2)) / window.innerWidth;
+        const y = (e.clientY - (r.top + r.height / 2)) / window.innerHeight;
+        card.style.setProperty('--ry', (x * 30) + 'deg');
+        card.style.setProperty('--rx', (-y * 30) + 'deg');
+      }
+      function reset() {
+        card.style.setProperty('--ry', '0deg');
+        card.style.setProperty('--rx', '0deg');
+      }
+      scene.addEventListener('pointermove', tilt);
+      scene.addEventListener('pointerdown', tilt);
+      scene.addEventListener('pointerup', reset);
+      scene.addEventListener('pointercancel', reset);
+      scene.addEventListener('pointerleave', reset);
+
+      function press() { card.classList.remove('bounce'); card.classList.add('pressed'); }
+      function release() {
+        if (!card.classList.contains('pressed')) return;
+        card.classList.remove('pressed'); card.classList.add('bounce');
+        setTimeout(() => card.classList.remove('bounce'), 500);
+      }
+      card.addEventListener('pointerdown', e => { if (e.target.tagName !== 'INPUT') press(); });
+      window.addEventListener('pointerup', release);
+      window.addEventListener('pointercancel', release);
+
+      /* ================= FIT TO SCREEN ================= */
+      // shrink the card if it is taller than the screen, so the page never scrolls
+      function fitCard() {
+        const need = card.offsetHeight + 44;        // card + room for the float animation
+        const have = window.innerHeight;
+        let s = Math.min(1, have / need);
+        if (s < 0.55) { s = 1; document.body.classList.add('scroll'); }   // too small: allow normal scroll instead
+        else document.body.classList.remove('scroll');
+        document.getElementById('fit').style.setProperty('--fit', s.toFixed(3));
+      }
+      new ResizeObserver(fitCard).observe(card);
+      window.addEventListener('resize', fitCard);
+
+      /* ================= GAME CLIENT ================= */
+      const socket = io();
+      const $ = id => document.getElementById(id);
+      const TURN_MS = 14000;
+      let S = null, offset = 0, current = 'home', lastState = null;
+
+      function show(id) {
+        if (id === current) return;
+        current = id;
+        document.querySelectorAll('#card > .screen').forEach(el => el.classList.toggle('show', el.id === id));
+      }
+      function toast(t) {
+        const el = $('toast'); el.textContent = t; el.hidden = false;
+        clearTimeout(el._t); el._t = setTimeout(() => el.hidden = true, 2500);
+      }
+      function confetti() {
+        const box = $('confetti'), colors = ['#4cff2a', '#dfe6f5', '#ffd23f', '#ff4d5e', '#4db8ff'];
+        for (let i = 0; i < 70; i++) {
+          const p = document.createElement('span');
+          p.style.left = Math.random() * 100 + '%';
+          p.style.background = colors[i % colors.length];
+          p.style.animationDuration = 2 + Math.random() * 2.5 + 's';
+          p.style.animationDelay = Math.random() * 0.8 + 's';
+          box.appendChild(p);
+          setTimeout(() => p.remove(), 6000);
+        }
+      }
+
+      /* ----- home / join ----- */
+      $('createBtn').onclick = () => socket.emit('createRoom', $('name').value, r => r.error && ($('homeErr').textContent = r.error));
+      $('toJoinBtn').onclick = () => {
+        if (!$('name').value.trim()) return $('homeErr').textContent = 'Enter your name first';
+        $('homeErr').textContent = ''; show('join'); $('codeInput').focus();
+      };
+      $('backBtn').onclick = () => { $('joinErr').textContent = ''; show('home'); };
+      $('joinBtn').onclick = () => socket.emit('joinRoom', { name: $('name').value, code: $('codeInput').value }, r => r.error && ($('joinErr').textContent = r.error));
+      $('codeInput').addEventListener('keydown', e => e.key === 'Enter' && $('joinBtn').click());
+      $('name').addEventListener('keydown', e => e.key === 'Enter' && $('createBtn').click());
+
+      /* ----- lobby / game buttons ----- */
+      function leave() { socket.emit('leaveRoom'); S = null; lastState = null; $('homeErr').textContent = ''; show('home'); }
+      $('leaveBtn').onclick = leave; $('leave2Btn').onclick = leave;
+      $('startBtn').onclick = () => socket.emit('startGame');
+      $('restartBtn').onclick = () => socket.emit('restart');
+      $('sendBtn').onclick = sendWord;
+      $('wordInput').addEventListener('keydown', e => e.key === 'Enter' && sendWord());
+      $('wordInput').addEventListener('input', () => { socket.emit('typing', $('wordInput').value); syncMirror(); });
+      function sendWord() {
+        const w = $('wordInput').value; if (!w) return;
+        socket.emit('submitWord', w, r => {
+          if (r.error) { $('gameErr').textContent = r.error; }
+          else { $('gameErr').textContent = ''; $('wordInput').value = ''; syncMirror(); }
+        });
+      }
+
+      socket.on('toast', toast);
+      socket.on('typing', t => { if (S) { S.typing = t; showTyping(); } });
+      socket.on('state', s => { S = s; offset = s.serverNow - Date.now(); render(); });
+      socket.on('disconnect', () => { S = null; lastState = null; show('home'); toast('Connection lost'); });
+
+      function playerList(el, st) {
+        el.innerHTML = '';
+        st.players.forEach(p => {
+          const li = document.createElement('li');
+          if (st.state !== 'lobby' && !p.alive) li.classList.add('out');
+          if (p.id === st.currentId) li.classList.add('turn');
+          const n = document.createElement('span');
+          n.textContent = p.name + (p.id === st.you ? ' (you)' : '') + (p.id === st.hostId ? ' 👑' : '');
+          li.appendChild(n);
+          if (st.state !== 'lobby') {
+            const l = document.createElement('span');
+            l.textContent = '❤️'.repeat(p.lives) + '🖤'.repeat(Math.max(0, 2 - p.lives));
+            li.appendChild(l);
+          }
+          el.appendChild(li);
+        });
+      }
+
+      // live typing display: every new letter pops in, existing letters stay still
+      let shownTyping = '';
+      function popLetter(w, ch) {
+        const sp = document.createElement('span');
+        sp.className = 'ch pop'; sp.textContent = ch; w.appendChild(sp);
+      }
+      // keeps `w` showing text `t`; only newly added letters pop. returns the new text.
+      function updatePop(w, prev, t) {
+        if (t.startsWith(prev)) { for (let k = prev.length; k < t.length; k++) popLetter(w, t[k]); }
+        else if (prev.startsWith(t)) { while (w.children.length > t.length) w.lastChild.remove(); }
+        else { w.textContent = ''; for (const c of t) popLetter(w, c); }
+        return t;
+      }
+      // your own typing: same pop animation drawn over the (invisible-text) input
+      let mirrorShown = '';
+      function syncMirror() {
+        mirrorShown = updatePop($('wordMirror'), mirrorShown, $('wordInput').value.toUpperCase());
+      }
+      function showTyping() {
+        const s = S, el = $('liveTyping');
+        const cur = s.players.find(p => p.id === s.currentId);
+        if (s.state !== 'playing' || s.currentId === s.you || !cur) { el.textContent = ''; shownTyping = ''; return; }
+
+        let lab = el.querySelector('i'), w = el.querySelector('.word');
+        if (!lab || !w) {
+          el.textContent = '';
+          lab = document.createElement('i'); w = document.createElement('span'); w.className = 'word';
+          el.append(lab, w); shownTyping = '';
+        }
+        const picking = s.phase === 'pick';
+        lab.textContent = cur.name + (picking ? ' is choosing a letter...' : ' is typing:');
+        const t = picking ? '' : (s.typing || '').toUpperCase();
+
+        if (!t) {                                   // nothing typed yet
+          w.textContent = picking ? '' : '...'; w.dataset.idle = '1'; shownTyping = ''; return;
+        }
+        if (w.dataset.idle === '1') { w.textContent = ''; w.dataset.idle = ''; shownTyping = ''; }
+
+        shownTyping = updatePop(w, shownTyping, t);   // only new letters pop
+      }
+
+      function render() {
+        const s = S; if (!s) return;
+        const isHost = s.hostId === s.you, me = s.players.find(p => p.id === s.you);
+
+        if (s.state === 'lobby') {
+          show('lobby');
+          $('lobbyCode').textContent = s.code;
+          playerList($('lobbyPlayers'), s);
+          $('startBtn').hidden = !isHost;
+          $('startBtn').disabled = s.players.length < 2;
+          $('lobbyHint').textContent = s.players.length < 2 ? 'Waiting for more players...' : (isHost ? 'Ready! Press Start.' : 'Waiting for the host to start...');
+          lastState = 'lobby'; return;
+        }
+
+        show('game');
+        playerList($('gamePlayers'), s);
+        const playing = s.state === 'playing';
+        const myTurn = playing && s.currentId === s.you;
+        const cur = s.players.find(p => p.id === s.currentId);
+
+        $('playArea').hidden = !playing;
+        $('turnInfo').textContent = !playing ? '' : myTurn ? 'YOUR TURN' : `${cur ? cur.name : ''}'s turn`;
+        $('turnInfo').classList.toggle('mine', myTurn);
+        $('required').textContent = !playing ? '' : (s.phase === 'pick' ? '?' : s.required);
+
+        $('letters').innerHTML = '';
+        if (myTurn && s.phase === 'pick') s.options.forEach(l => {
+          const b = document.createElement('button'); b.className = 'secondary'; b.textContent = l;
+          b.onclick = () => socket.emit('pickLetter', l); $('letters').appendChild(b);
+        });
+        const typing = myTurn && s.phase === 'type';
+        $('typeArea').hidden = !typing;
+        if (typing) { $('wordInput').focus(); syncMirror(); }
+        $('gameErr').textContent = '';
+        showTyping();
+
+        $('specInfo').textContent = me && !me.alive && playing ? '👀 You are out — spectating' : '';
+
+        $('winBox').hidden = s.state !== 'ended';
+        if (s.state === 'ended') {
+          const w = s.players.find(p => p.id === s.winnerId);
+          $('winText').textContent = w ? `🏆 ${w.name} wins!` : 'Match over';
+          $('restartBtn').hidden = !isHost;
+          if (lastState !== 'ended') confetti();
+        }
+        lastState = s.state;
+      }
+
+      /* timer ring + restart cooldown (display only - the server is the real authority) */
+      setInterval(() => {
+        if (!S) return;
+        const now = Date.now() + offset;
+        if (S.state === 'playing' && S.deadline) {
+          const ms = Math.max(0, S.deadline - now), secs = Math.ceil(ms / 1000);
+          $('ringNum').textContent = secs;
+          $('arc').style.strokeDashoffset = 213.6 * (1 - Math.min(1, ms / TURN_MS));
+          $('ring').classList.toggle('low', secs <= 5);
+        }
+        if (S.state === 'ended' && S.restartUnlockAt) {
+          const left = Math.max(0, Math.ceil((S.restartUnlockAt - now) / 1000));
+          $('restartBtn').disabled = left > 0;
+          $('restartBtn').textContent = left > 0 ? `Restart match (${left})` : 'Restart match';
+        }
+      }, 100);
+    </script>
+  </body>
+</html>
