@@ -64,6 +64,7 @@ function toast(room, text) { io.to(room.code).emit('toast', text); }
 function resetGame(room) {
   room.players.forEach(p => { p.lives = START_LIVES; p.alive = true; });
   room.round = 0; room.lastWord = null; room.winnerId = null; room.restartUnlockAt = null;
+  room.usedWords = new Set();          // fresh list of played words for every match
   room.turnIdx = 0; room.state = 'playing';
   startTurn(room);
 }
@@ -138,7 +139,8 @@ io.on('connection', socket => {
     if (!name) return cb({ error: 'Enter your name first' });
     const code = makeCode();
     rooms[code] = { code, state: 'lobby', players: [], turnIdx: 0, round: 0, lastWord: null, phase: null,
-      options: null, required: null, deadline: null, winnerId: null, restartUnlockAt: null, timer: null };
+      options: null, required: null, deadline: null, winnerId: null, restartUnlockAt: null, timer: null,
+      usedWords: new Set() };
     joinRoom(socket, rooms[code], name);
     cb({ ok: true });
   });
@@ -190,7 +192,9 @@ io.on('connection', socket => {
     if (!word.startsWith(room.required.toLowerCase())) return cb({ error: `Must start with ${room.required}` });
     if (word.length < 2) return cb({ error: 'Too short' });
     if (!DICT.has(word)) return cb({ error: 'Not a valid word' });
-    room.lastWord = word;                 // repeats are allowed
+    if (room.usedWords.has(word)) return cb({ error: 'Already used! 🚫' });
+    room.usedWords.add(word);            // remember it so it can't be played again this match
+    room.lastWord = word;
     cb({ ok: true });
     advance(room);
   });
